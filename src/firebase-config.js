@@ -6,12 +6,12 @@
 // ─────────────────────────────────────────────────────────────────────
 
 export const firebaseConfig = {
-  apiKey: "",
-  authDomain: "",
-  projectId: "",
-  storageBucket: "",
-  messagingSenderId: "",
-  appId: "",
+  apiKey: "AIzaSyBbolPLCBBq2OdKOfgL5FPnzL4KxHCEwtk",
+  authDomain: "tableau-du-foyer.firebaseapp.com",
+  projectId: "tableau-du-foyer",
+  storageBucket: "tableau-du-foyer.firebasestorage.app",
+  messagingSenderId: "661276884651",
+  appId: "1:661276884651:web:7b7d626d1cd567f06a41ee",
 };
 
 // Nom du "carnet" partagé par la famille. À garder identique sur tous les
