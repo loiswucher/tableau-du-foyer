@@ -1,0 +1,6 @@
+# La clé de signature est binaire : Git ne doit jamais la convertir
+keystore/debug.keystore binary
+*.keystore binary
+*.png binary
+*.jpg binary
+*.ico binary
