@@ -136,3 +136,15 @@ button { font-family: inherit; cursor: pointer; }
 .actions .btn { width: 100%; }
 .notifybtn { background: #F2A93B; }
 .ghostfull { background: transparent; border: 1.5px solid rgba(31,58,77,0.25); color: var(--ink); }
+
+/* ── Frise : plus de défilement au doigt, l'ascenseur s'en charge ── */
+.tl-wrap.noscroll { overflow-x: hidden; touch-action: pan-y; }
+.tl-slider { width: 100%; margin: 8px 0 2px; accent-color: var(--ink); height: 22px; }
+/* ── Boutons Réglages lisibles (fini les fantômes) ── */
+.photobtn { flex: 0 0 auto; background: #eef2f5; color: var(--ink); border: none; border-radius: 10px; padding: 8px 12px; font: inherit; font-size: 12.5px; font-weight: 700; }
+.undobtn { flex: 0 0 auto; background: #eef2f5; color: var(--ink); border: none; border-radius: 9px; padding: 5px 12px; font: inherit; font-size: 12px; font-weight: 700; }
+/* ── Champ multi-horaires dans la fiche ── */
+.timerow { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.timerow .inp { flex: 1; }
+.timedel { flex: 0 0 auto; background: #fbe9e9; color: #c0392b; border: none; border-radius: 9px; padding: 8px 11px; font: inherit; font-weight: 800; }
+.timeadd { background: #eef2f5; color: var(--ink); border: none; border-radius: 10px; padding: 9px 12px; font: inherit; font-size: 13px; font-weight: 700; margin-top: 2px; }
