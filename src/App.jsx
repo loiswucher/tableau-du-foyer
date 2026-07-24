@@ -82,33 +82,51 @@ export default function App() {
   const [state, setState] = useState(loadState);
   const [tab, setTab] = useState("today");
   const [sync, setSync] = useState(cloudEnabled() ? "connexion…" : null);
-  const localRev = useRef(state.rev ?? 0);
   const pushTimer = useRef(null);
+  const applyingRemote = useRef(false); // évite de renvoyer au cloud ce qu'on vient d'en recevoir
   const [toast, setToast] = useState(null);
   const [editTask, setEditTask] = useState(null);
   const [validating, setValidating] = useState(null); // tâche en attente de "qui l'a faite ?"
   const toastTimer = useRef(null);
   const { members, tasks, settings, history } = state;
 
-  // Toute modification locale incrémente la révision : c'est elle qui
-  // départage les téléphones quand deux personnes agissent en même temps.
-  const patch = (p) => setState((s) => {
-    const next = { ...s, ...p, rev: (s.rev ?? 0) + 1 };
-    localRev.current = next.rev;
-    return next;
-  });
+  const patch = (p) => setState((s) => ({ ...s, ...p, rev: (s.rev ?? 0) + 1 }));
+
+  // Fusionne un état distant avec l'état local SANS rien perdre :
+  //  • l'historique = union des validations des deux appareils (clé = id unique)
+  //  • tâches / réglages / membres = on prend la version la plus récemment modifiée
+  const mergeRemote = (local, remote) => {
+    const seen = new Set();
+    const merged = [];
+    for (const e of [...(local.history || []), ...(remote.history || [])]) {
+      if (e && e.id && !seen.has(e.id)) { seen.add(e.id); merged.push(e); }
+    }
+    merged.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+    const remoteNewer = (remote.rev ?? 0) >= (local.rev ?? 0);
+    const base = remoteNewer ? remote : local;
+    return {
+      ...local,
+      members: base.members ?? local.members,
+      tasks: base.tasks ?? local.tasks,
+      settings: base.settings ?? local.settings,
+      weekStart: base.weekStart ?? local.weekStart,
+      history: merged,
+      rev: Math.max(local.rev ?? 0, remote.rev ?? 0),
+    };
+  };
 
   useEffect(() => {
     saveState(state);
     if (isNative()) reschedule(computeNotifications(tasks, history, settings, members));
-    if (cloudEnabled()) {
+    if (cloudEnabled() && !applyingRemote.current) {
       clearTimeout(pushTimer.current);
       pushTimer.current = setTimeout(() => {
         cloudPush(state)
           .then(() => setSync("à jour"))
           .catch(() => setSync("hors ligne"));
-      }, 700); // on regroupe les changements rapprochés
+      }, 700);
     }
+    applyingRemote.current = false;
   }, [state]);
 
   // Écoute des changements venus des autres téléphones du foyer
@@ -117,10 +135,15 @@ export default function App() {
     let stop = () => {};
     subscribe(
       (remote) => {
-        if ((remote.rev ?? 0) <= localRev.current) return; // notre version est plus récente
-        localRev.current = remote.rev ?? 0;
-        setState((s) => ({ ...s, ...remote }));
-        setSync("mis à jour");
+        setState((s) => {
+          const merged = mergeRemote(s, remote);
+          // Rien de nouveau ? on évite un cycle inutile
+          if (merged.history.length === (s.history || []).length &&
+              (remote.rev ?? 0) <= (s.rev ?? 0)) return s;
+          applyingRemote.current = true; // ce changement vient du cloud, ne pas le repush en boucle
+          return merged;
+        });
+        setSync("à jour");
       },
       (st) => setSync(st)
     ).then((fn) => { stop = fn; });
