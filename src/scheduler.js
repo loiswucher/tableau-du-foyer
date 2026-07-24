@@ -26,10 +26,12 @@ export function lastDone(task, history) {
   return null;
 }
 
-/** La tâche a-t-elle été validée le jour donné ? */
-export function doneOn(task, history, date) {
+/** La tâche a-t-elle été validée le jour donné ? (occ = heure précise, optionnel) */
+export function doneOn(task, history, date, occ) {
   const k = dayKey(date);
-  return history.some((e) => e.taskId === task.id && dayKey(e.ts) === k);
+  return history.some((e) =>
+    e.taskId === task.id && dayKey(e.ts) === k && (occ == null || e.occ == null || e.occ === occ)
+  );
 }
 
 /** La tâche est-elle due le jour donné ? */
@@ -62,16 +64,20 @@ export function isDueOn(task, history, date, settings) {
 }
 
 /**
- * Heure propre à la tâche sur la frise.
- * Une heure explicite (posée à la main ou par glisser-déposer) prime toujours ;
- * sinon on retombe sur l'heure par défaut du créneau ou de la fréquence.
+ * Heure(s) de la tâche sur la frise.
+ * `times` (tableau) prime ; sinon `time` (unique) ; sinon défaut du créneau.
+ * taskTime renvoie la PREMIÈRE heure (compat), taskTimes renvoie toutes.
  */
+export function taskTimes(task, settings) {
+  if (Array.isArray(task.times) && task.times.length) return [...task.times].sort();
+  if (task.time) return [task.time];
+  if (task.freq === "quotidien") return [settings.slots[task.slot || "soir"].time];
+  if (task.freq === "hebdo") return [settings.hebdo.time];
+  if (task.freq === "mensuel") return [task.paiement ? settings.paiements.time : settings.mensuel.time];
+  return [settings.annuel.time];
+}
 export function taskTime(task, settings) {
-  if (task.time) return task.time;
-  if (task.freq === "quotidien") return settings.slots[task.slot || "soir"].time;
-  if (task.freq === "hebdo") return settings.hebdo.time;
-  if (task.freq === "mensuel") return task.paiement ? settings.paiements.time : settings.mensuel.time;
-  return settings.annuel.time;
+  return taskTimes(task, settings)[0];
 }
 
 /** Tâches du jour, groupées par créneau (rangement par heure réelle) */
@@ -82,15 +88,18 @@ export function tasksForDay(tasks, history, date, settings) {
     .map(([k, s]) => ({ k, min: toMin(s.time) }))
     .sort((a, b) => a.min - b.min);
   for (const t of due) {
-    const m = toMin(taskTime(t, settings));
-    if (t.freq === "quotidien" || t.time) {
-      let slot = bounds[0].k;
-      for (const b of bounds) if (m >= b.min) slot = b.k;
-      groups[slot].push(t);
+    const times = taskTimes(t, settings);
+    if (t.freq === "quotidien" || t.time || t.times) {
+      for (const tm of times) {
+        const m = toMin(tm);
+        let slot = bounds[0].k;
+        for (const b of bounds) if (m >= b.min) slot = b.k;
+        groups[slot].push({ ...t, occ: tm, _occ: tm }); // occurrence à cette heure
+      }
     } else groups.autre.push(t);
   }
   for (const k of Object.keys(groups)) {
-    groups[k].sort((a, b) => toMin(taskTime(a, settings)) - toMin(taskTime(b, settings)));
+    groups[k].sort((a, b) => toMin(a.occ || taskTime(a, settings)) - toMin(b.occ || taskTime(b, settings)));
   }
   return groups;
 }
@@ -138,16 +147,21 @@ export function computeNotifications(tasks, history, settings, members = [], day
     );
     if (!due.length) continue;
 
+    // Éclater les tâches multi-horaires en occurrences (une par heure)
+    const occs = [];
+    for (const t of due) {
+      for (const tm of taskTimes(t, settings)) occs.push({ t, tm, m: toMin(tm) });
+    }
     let prev = -1;
     for (const cp of [...checkpoints].sort((a, b) => toMin(a) - toMin(b))) {
       const at = atTime(day, cp);
       const cpMin = toMin(cp);
       if (at > now) {
-        const late = due.filter((t) => {
-          const m = toMin(taskTime(t, settings));
-          if (m > cpMin || m <= prev) return false;
-          return !(i === 0 && doneOn(t, history, day));
+        const lateOcc = occs.filter((o) => {
+          if (o.m > cpMin || o.m <= prev) return false;
+          return !(i === 0 && doneOn(o.t, history, day, o.tm));
         });
+        const late = lateOcc.map((o) => o.t);
         const kids = late.filter((t) => t.kids);
         const adults = late.filter((t) => !t.kids);
         if (adults.length)
