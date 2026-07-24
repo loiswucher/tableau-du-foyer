@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { CATS } from "./data.js";
 import { loadState, saveState } from "./store.js";
-import { tasksForDay, doneOn, computeNotifications, isDueOn, taskTime, toMin, ranked } from "./scheduler.js";
+import { tasksForDay, doneOn, computeNotifications, isDueOn, taskTime, taskTimes, toMin, ranked } from "./scheduler.js";
 import { initNotifications, reschedule, testNotification, pokeNotification, isNative } from "./notifications.js";
 import { cloudEnabled, subscribe, push as cloudPush } from "./cloud.js";
 
@@ -139,10 +139,10 @@ export default function App() {
   };
 
   // Validation : on demande toujours qui l'a faite
-  const askWho = (task, mode = "done") => setValidating({ task, mode });
-  const confirmWho = (task, ids) => {
+  const askWho = (task, mode = "done", occ = null) => setValidating({ task, mode, occ });
+  const confirmWho = (task, ids, occ) => {
     const ts = Date.now();
-    const entries = ids.map((mid) => ({ id: uid(), taskId: task.id, memberId: mid, pts: task.pts, ts }));
+    const entries = ids.map((mid) => ({ id: uid(), taskId: task.id, memberId: mid, pts: task.pts, ts, ...(occ ? { occ } : {}) }));
     patch({ history: [...history, ...entries] });
     setValidating(null);
     confetti();
@@ -158,8 +158,22 @@ export default function App() {
   };
   const deleteTask = (id) => { patch({ tasks: tasks.filter((t) => t.id !== id) }); setEditTask(null); };
   const setTaskTime = (id, time, silent) => {
-    patch({ tasks: tasks.map((t) => (t.id === id ? { ...t, time } : t)) });
+    patch({ tasks: tasks.map((t) => (t.id === id ? { ...t, time, times: undefined } : t)) });
     if (!silent) notify(`Déplacé à ${fmtTime(time)} — et les jours suivants aussi`);
+  };
+  // Déplace UNE occurrence d'une tâche multi-horaires (remplace oldTime par newTime)
+  const setTaskOccTime = (id, oldTime, newTime, silent) => {
+    patch({
+      tasks: tasks.map((t) => {
+        if (t.id !== id) return t;
+        const list = Array.isArray(t.times) && t.times.length ? [...t.times] : [t.time || oldTime];
+        const i = list.indexOf(oldTime);
+        if (i >= 0) list[i] = newTime; else list.push(newTime);
+        const uniq = [...new Set(list)].sort();
+        return uniq.length > 1 ? { ...t, times: uniq, time: undefined } : { ...t, time: uniq[0], times: undefined };
+      }),
+    });
+    if (!silent) notify(`Déplacé à ${fmtTime(newTime)} — et les jours suivants aussi`);
   };
   const doPoke = (task, ids) => {
     const targets = members.filter((m) => ids.includes(m.id));
@@ -198,7 +212,7 @@ export default function App() {
   return (
     <>
       {tab === "today" && <Today {...common} />}
-      {tab === "plan" && <Planning {...common} onAdd={() => setEditTask("new")} setTaskTime={setTaskTime} />}
+      {tab === "plan" && <Planning {...common} onAdd={() => setEditTask("new")} setTaskTime={setTaskTime} setTaskOccTime={setTaskOccTime} />}
       {tab === "scores" && (
         <Scores {...{ members, tasks, history }} weekStart={state.weekStart}
           onUndo={(id) => undo([id])}
@@ -222,7 +236,7 @@ export default function App() {
         </div>
       )}
 
-      {validating && <WhoSheet task={validating.task} initialMode={validating.mode} members={members} onConfirm={confirmWho} onNotify={doPoke} onClose={() => setValidating(null)} />}
+      {validating && <WhoSheet task={validating.task} occ={validating.occ} initialMode={validating.mode} members={members} onConfirm={confirmWho} onNotify={doPoke} onClose={() => setValidating(null)} />}
       {editTask && (
         <TaskSheet task={editTask === "new" ? null : editTask} settings={settings} members={members}
           onSave={saveTask} onDelete={deleteTask} onClose={() => setEditTask(null)} />
@@ -232,7 +246,7 @@ export default function App() {
 }
 
 // ─── Panneau de validation : qui l'a faite ? / notifier un membre ───
-function WhoSheet({ task, initialMode = "done", members, onConfirm, onNotify, onClose }) {
+function WhoSheet({ task, occ, initialMode = "done", members, onConfirm, onNotify, onClose }) {
   const [sel, setSel] = useState([]);
   const [mode, setMode] = useState(initialMode);
   const toggle = (id) => setSel((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
@@ -278,7 +292,7 @@ function WhoSheet({ task, initialMode = "done", members, onConfirm, onNotify, on
 
         <button className="btn" disabled={!sel.length}
           style={{ width: "100%", marginTop: 16, opacity: sel.length ? 1 : 0.4, background: mode === "done" ? cat.color : "#F2A93B" }}
-          onClick={() => (mode === "done" ? onConfirm(task, sel) : onNotify(task, sel))}>
+          onClick={() => (mode === "done" ? onConfirm(task, sel, occ) : onNotify(task, sel))}>
           {mode === "done"
             ? `✓ Valider${sel.length > 1 ? ` pour ${sel.length} personnes` : ""}`
             : `🔔 Envoyer le rappel${sel.length > 1 ? ` à ${sel.length} personnes` : ""}`}
@@ -297,8 +311,9 @@ function Today({ members, tasks, settings, history, onEdit, askWho }) {
   const dateStr = today.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
   const nowMin = today.getHours() * 60 + today.getMinutes();
 
-  const total = Object.values(groups).flat().length;
-  const done = Object.values(groups).flat().filter((t) => doneOn(t, history, today)).length;
+  const flat = Object.values(groups).flat();
+  const total = flat.length;
+  const done = flat.filter((t) => doneOn(t, history, today, t.occ || taskTime(t, settings))).length;
 
   return (
     <>
@@ -316,14 +331,15 @@ function Today({ members, tasks, settings, history, onEdit, askWho }) {
           <section key={k}>
             <h2>{slot.emoji} {slot.label}</h2>
             {list.map((t) => {
-              const isDone = doneOn(t, history, today);
+              const occ = t.occ || taskTime(t, settings);
+              const isDone = doneOn(t, history, today, occ);
               const cat = CATS[t.cat] || CATS.menage;
-              const late = !isDone && toMin(taskTime(t, settings)) < nowMin;
+              const late = !isDone && toMin(occ) < nowMin;
               return (
-                <div key={t.id} className={`tcard ${t.kids ? "kids" : ""}`} style={{ borderLeft: `5px solid ${cat.color}` }}>
+                <div key={t.id + "@" + occ} className={`tcard ${t.kids ? "kids" : ""}`} style={{ borderLeft: `5px solid ${cat.color}` }}>
                   {t.kids && <span className="tl-kid" />}
-                  <button className="cardbtn" onClick={() => setDetail(t)}>
-                    <b style={{ fontSize: 12.5, opacity: 0.65, minWidth: 40 }}>{fmtTime(taskTime(t, settings))}</b>
+                  <button className="cardbtn" onClick={() => setDetail({ ...t, occ })}>
+                    <b style={{ fontSize: 12.5, opacity: 0.65, minWidth: 40 }}>{fmtTime(occ)}</b>
                     <span className={isDone ? "done" : ""} style={{ flex: 1 }}>{cat.emoji} {t.name}</span>
                     {(t.assignees || []).map((id) => {
                       const m = members.find((x) => x.id === id);
@@ -334,7 +350,7 @@ function Today({ members, tasks, settings, history, onEdit, askWho }) {
                   {isDone ? (
                     <span className="badge" style={{ background: "#e3f4e9", color: "#2e7d4f" }}>✓ Fait</span>
                   ) : (
-                    <button className="btn" style={{ background: cat.color, padding: "7px 12px", fontSize: 13 }} onClick={() => askWho(t)}>✓ Fait</button>
+                    <button className="btn" style={{ background: cat.color, padding: "7px 12px", fontSize: 13 }} onClick={() => askWho(t, "done", occ)}>✓ Fait</button>
                   )}
                 </div>
               );
@@ -352,15 +368,15 @@ function Today({ members, tasks, settings, history, onEdit, askWho }) {
               {(CATS[detail.cat] || CATS.menage).emoji} {detail.name}
             </h3>
             <p className="sub">
-              Prévu à {fmtTime(taskTime(detail, settings))} · {detail.pts} pt{detail.pts > 1 ? "s" : ""}
+              Prévu à {fmtTime(detail.occ || taskTime(detail, settings))} · {detail.pts} pt{detail.pts > 1 ? "s" : ""}
               {detail.kids ? " · 🟢 faisable par les enfants" : ""}
             </p>
             <div className="actions">
-              {!doneOn(detail, history, today) && (
+              {!doneOn(detail, history, today, detail.occ) && (
                 <button className="btn" style={{ background: (CATS[detail.cat] || CATS.menage).color }}
-                  onClick={() => { askWho(detail, "done"); setDetail(null); }}>✓ C'est fait</button>
+                  onClick={() => { askWho(detail, "done", detail.occ); setDetail(null); }}>✓ C'est fait</button>
               )}
-              <button className="btn notifybtn" onClick={() => { askWho(detail, "notify"); setDetail(null); }}>
+              <button className="btn notifybtn" onClick={() => { askWho(detail, "notify", detail.occ); setDetail(null); }}>
                 🔔 Notifier un membre
               </button>
               <button className="btn ghostfull" onClick={() => { onEdit(detail); setDetail(null); }}>Modifier la fiche</button>
@@ -374,7 +390,7 @@ function Today({ members, tasks, settings, history, onEdit, askWho }) {
 }
 
 // ─── Planning : frise + bibliothèque ────────────────────────────────
-function Planning({ tasks, settings, members, history, onEdit, onAdd, askWho, setTaskTime }) {
+function Planning({ tasks, settings, members, history, onEdit, onAdd, askWho, setTaskTime, setTaskOccTime }) {
   const [offset, setOffset] = useState(0);
   const [open, setOpen] = useState({});
   const [quick, setQuick] = useState(null);
@@ -401,13 +417,18 @@ function Planning({ tasks, settings, members, history, onEdit, onAdd, askWho, se
     return `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}`;
   };
 
+  // Une tâche peut avoir plusieurs horaires → une occurrence par heure.
+  // Pendant un glissement, seule l'occurrence tirée suit le doigt.
   const due = tasks
     .filter((t) => t.freq !== "exceptionnel" && isDueOn(t, history, day, settings))
-    .map((t) => {
-      const time = drag?.taskId === t.id ? drag.time : taskTime(t, settings);
-      const [h, m] = time.split(":").map(Number);
-      return { t, time, h, m, x: (h + m / 60 - HSTART) * PPH };
-    })
+    .flatMap((t) =>
+      taskTimes(t, settings).map((baseTime) => {
+        const dragging = drag?.taskId === t.id && drag?.occ === baseTime;
+        const time = dragging ? drag.time : baseTime;
+        const [h, m] = time.split(":").map(Number);
+        return { t, occ: baseTime, time, h, m, x: (h + m / 60 - HSTART) * PPH };
+      })
+    )
     .sort((a, b) => a.h * 60 + a.m - (b.h * 60 + b.m));
 
   // Empilement : chaque étiquette prend une ligne libre s'il y a collision.
@@ -428,11 +449,13 @@ function Planning({ tasks, settings, members, history, onEdit, onAdd, askWho, se
   const now = new Date();
   const nowX = (now.getHours() + now.getMinutes() / 60 - HSTART) * PPH;
 
-  // ── Glisser horizontal pour changer l'heure ───────────────────────
+  // ── Glisser une tâche pour changer son heure (uniquement horizontal) ──
+  // Le déplacement suit le doigt SANS faire défiler la frise : la frise
+  // reste fixe, seul l'ascenseur du bas navigue dans la journée.
   const down = (e, item) => {
     const rect = wrapRef.current.getBoundingClientRect();
     dragRef.current = {
-      taskId: item.t.id, startX: e.clientX, moved: false,
+      taskId: item.t.id, occ: item.occ, startX: e.clientX, moved: false,
       originX: item.x, wrapLeft: rect.left, scroll: wrapRef.current.scrollLeft,
       time: item.time, task: item.t,
     };
@@ -444,8 +467,10 @@ function Planning({ tasks, settings, members, history, onEdit, onAdd, askWho, se
     const dx = e.clientX - d.startX;
     if (!d.moved && Math.abs(dx) < 6) return;
     if (!d.moved) { d.moved = true; navigator.vibrate?.(12); }
-    d.time = xToTime(d.originX + dx);
-    setDrag({ taskId: d.taskId, time: d.time });
+    // on tient compte du défilement courant de la frise pour rester juste
+    const scrolled = wrapRef.current ? wrapRef.current.scrollLeft - d.scroll : 0;
+    d.time = xToTime(d.originX + dx + scrolled);
+    setDrag({ taskId: d.taskId, occ: d.occ, time: d.time });
   };
   const justDragged = useRef(0);
   const up = () => {
@@ -454,9 +479,26 @@ function Planning({ tasks, settings, members, history, onEdit, onAdd, askWho, se
     setDrag(null);
     if (!d) return;
     if (d.moved) {
-      justDragged.current = Date.now(); // évite d'ouvrir le détail après un déplacement
-      if (d.time !== taskTime(d.task, settings)) setTaskTime(d.taskId, d.time);
+      justDragged.current = Date.now();
+      if (d.time !== d.occ) setTaskOccTime(d.taskId, d.occ, d.time);
     }
+  };
+
+  // ── Ascenseur : pilote le défilement de la frise ──────────────────
+  const [scrollFrac, setScrollFrac] = useState(0);
+  const syncSlider = () => {
+    const w = wrapRef.current;
+    if (!w) return;
+    const max = w.scrollWidth - w.clientWidth;
+    setScrollFrac(max > 0 ? w.scrollLeft / max : 0);
+  };
+  const onSlider = (e) => {
+    const w = wrapRef.current;
+    if (!w) return;
+    const frac = Number(e.target.value) / 1000;
+    const max = w.scrollWidth - w.clientWidth;
+    w.scrollLeft = frac * max;
+    setScrollFrac(frac);
   };
   // Le tap passe par un vrai clic : fiable sur tous les téléphones,
   // même si le navigateur interrompt le geste (scroll, pointercancel…).
@@ -502,7 +544,7 @@ function Planning({ tasks, settings, members, history, onEdit, onAdd, askWho, se
         <button className="navbtn" disabled={offset >= 7} onClick={() => setOffset(offset + 1)}>&#8594;</button>
       </div>
 
-      <div className="tl-wrap" ref={wrapRef}>
+      <div className="tl-wrap noscroll" ref={wrapRef} onScroll={syncSlider}>
         <div className="tl-inner" style={{ width: tlWidth, height: tlHeight }}>
           {PERIODS.map((p) => (
             <span key={p.label}>
@@ -518,12 +560,12 @@ function Planning({ tasks, settings, members, history, onEdit, onAdd, askWho, se
           ))}
           {isToday && nowX > 0 && nowX < tlWidth && <div className="tl-now" style={{ left: nowX }} />}
           {due.map((item) => {
-            const { t, h, m, x, row } = item;
+            const { t, h, m, x, row, occ } = item;
             const cat = CATS[t.cat] || CATS.menage;
-            const isDone = isToday && doneOn(t, history, day);
-            const dragging = drag?.taskId === t.id;
+            const isDone = isToday && doneOn(t, history, day, occ);
+            const dragging = drag?.taskId === t.id && drag?.occ === occ;
             return (
-              <button key={t.id} className={`tl-task ${isDone ? "tl-done" : ""} ${dragging ? "tl-drag" : ""}`}
+              <button key={t.id + "@" + occ} className={`tl-task ${isDone ? "tl-done" : ""} ${dragging ? "tl-drag" : ""}`}
                 style={{ left: x, top: HEAD + row * ROWH, maxWidth: LMAX }}
                 onPointerDown={(e) => down(e, item)} onPointerMove={move} onPointerUp={up} onPointerCancel={up}
                 onClick={() => tapTask(t)}>
@@ -538,7 +580,10 @@ function Planning({ tasks, settings, members, history, onEdit, onAdd, askWho, se
           {!due.length && <div style={{ position: "absolute", top: HEAD + 4, left: 12, fontSize: 13, opacity: 0.6 }}>Rien de prévu ce jour-là 🏖️</div>}
         </div>
       </div>
-      <p className="sub">Fais glisser une tâche vers la gauche ou la droite pour changer son heure — le changement vaut aussi pour les jours suivants. Un simple tap ouvre le détail.</p>
+
+      <input className="tl-slider" type="range" min="0" max="1000" value={Math.round(scrollFrac * 1000)}
+        onChange={onSlider} aria-label="Faire défiler la journée" />
+      <p className="sub">Fais coulisser la barre ci-dessus pour parcourir la journée. Dans la frise, glisse une tâche pour changer son heure ; touche-la pour ouvrir le détail.</p>
 
       <h2 style={{ marginTop: 22 }}>Bibliothèque des fiches</h2>
       <p className="sub">Tout le stock est rangé ici, replié.</p>
@@ -611,7 +656,17 @@ function TaskSheet({ task, settings, members, onSave, onDelete, onClose }) {
     id: "new", name: "", cat: "menage", freq: "quotidien", slot: "soir", time: "19:30", pts: 2, kids: false, cycleDays: 4,
   });
   const set = (p) => setT((x) => ({ ...x, ...p }));
-  const currentTime = t.time || taskTime(t, settings);
+
+  // Liste des horaires en cours d'édition (au moins un)
+  const times = (Array.isArray(t.times) && t.times.length ? t.times : [t.time || taskTime(t, settings)]);
+  const commitTimes = (list) => {
+    const uniq = [...new Set(list.filter(Boolean))].sort();
+    if (uniq.length <= 1) set({ time: uniq[0] || "19:30", times: undefined });
+    else set({ times: uniq, time: undefined });
+  };
+  const setTimeAt = (i, v) => { const l = [...times]; l[i] = v; commitTimes(l); };
+  const addTime = () => commitTimes([...times, "12:00"]);
+  const removeTimeAt = (i) => commitTimes(times.filter((_, j) => j !== i));
 
   return (
     <div className="sheet-bg" onClick={onClose}>
@@ -673,8 +728,21 @@ function TaskSheet({ task, settings, members, onSave, onDelete, onClose }) {
         )}
         {t.freq !== "exceptionnel" && t.freq !== "annuel" && (
           <>
-            <label className="lbl">Heure sur le planning</label>
-            <input className="inp" type="time" value={currentTime} onChange={(e) => set({ time: e.target.value })} />
+            <label className="lbl">Heure(s) sur le planning</label>
+            {times.map((tm, i) => (
+              <div className="timerow" key={i}>
+                <input className="inp" type="time" value={tm} onChange={(e) => setTimeAt(i, e.target.value)} />
+                {times.length > 1 && (
+                  <button className="timedel" onClick={() => removeTimeAt(i)} title="Retirer cette heure">✕</button>
+                )}
+              </div>
+            ))}
+            <button className="timeadd" onClick={addTime}>+ Ajouter une heure</button>
+            {times.length > 1 && (
+              <p className="sub" style={{ marginTop: 6 }}>
+                Cette tâche apparaîtra {times.length} fois dans la journée, à chacune de ces heures.
+              </p>
+            )}
           </>
         )}
 
@@ -773,7 +841,7 @@ function Scores({ members, tasks, history, weekStart, onUndo, onNewWeek }) {
               {m?.emoji} <b>{m?.name}</b> · {t?.name ?? "tâche supprimée"} <span style={{ opacity: 0.5 }}>· {timeAgo(e.ts)}</span>
             </span>
             <b>+{e.pts}</b>
-            <button className="btn ghost" style={{ padding: "2px 8px" }} onClick={() => onUndo(e.id)}>Annuler</button>
+            <button className="undobtn" onClick={() => onUndo(e.id)}>Annuler</button>
           </div>
         );
       })}
@@ -833,8 +901,8 @@ function Settings({ members, settings, sync, onChange, notify }) {
               <small>{m.role === "parent" ? "Parent" : m.role === "bebe" ? "Bébé" : "Enfant"}
                 {m.birth ? ` · né le ${m.birth.split("-").reverse().join("/")}` : ""}</small>
             </span>
-            <button className="btn ghost photobtn" onClick={() => (m.photo ? removePhoto(m.id) : pickPhoto(m.id))}>
-              {m.photo ? "Retirer la photo" : "Ajouter une photo"}
+            <button className="photobtn" onClick={() => (m.photo ? removePhoto(m.id) : pickPhoto(m.id))}>
+              {m.photo ? "Retirer" : "📷 Photo"}
             </button>
           </div>
         ))}
