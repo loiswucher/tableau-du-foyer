@@ -34,11 +34,6 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - name: Utiliser une clé de signature stable
-        run: |
-          mkdir -p ~/.android
-          cp keystore/debug.keystore ~/.android/debug.keystore
-
       - name: Créer le projet Android (Capacitor)
         run: npx cap add android
 
@@ -47,6 +42,13 @@ jobs:
 
       - name: Ajouter les icônes de notification
         run: cp -r native-res/. android/app/src/main/res/
+
+      - name: Fixer la clé de signature (stable entre les builds)
+        run: |
+          cp keystore/debug.keystore android/app/debug.keystore
+          mkdir -p ~/.android
+          cp keystore/debug.keystore ~/.android/debug.keystore
+          printf '\nandroid {\n  signingConfigs {\n    debug {\n      storeFile file("debug.keystore")\n      storePassword "android"\n      keyAlias "androiddebugkey"\n      keyPassword "android"\n    }\n  }\n}\n' >> android/app/build.gradle
 
       - name: Synchroniser Capacitor
         run: npx cap sync android
