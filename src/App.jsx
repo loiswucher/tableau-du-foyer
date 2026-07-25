@@ -929,7 +929,7 @@ function Settings({ members, settings, sync, onChange, notify }) {
             </button>
           </div>
         ))}
-        <p className="sub" style={{ margin: "10px 0 0" }}>Mélisse et Syrah (chiens) · les tortues</p>
+        <p className="sub" style={{ margin: "10px 0 0" }}>Mélisse 🐕 (chien) · Syrah 🐈 (chat) · les tortues 🐢</p>
       </div>
 
       <h2>Points de contrôle</h2>
